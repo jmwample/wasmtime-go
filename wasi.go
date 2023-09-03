@@ -2,9 +2,11 @@ package wasmtime
 
 // #include <wasi.h>
 // #include <stdlib.h>
+// #include <stdint.h>
 import "C"
 import (
 	"errors"
+	"os"
 	"runtime"
 	"unsafe"
 )
@@ -148,3 +150,84 @@ func (c *WasiConfig) PreopenDir(path, guestPath string) error {
 
 	return errors.New("failed to preopen directory")
 }
+
+// PreopenTCPSocket configures a "preopened" tcp listen socket to be available to
+// WASI APIs after build.
+//
+// By default WASI programs do not have access to open up network sockets on the
+// host. This API can be used to grant WASI programs access to a network socket
+// file descriptor on the host.
+//
+// The fd_num argument is the number of the file descriptor by which it will be
+// known in WASM and the host_port is the IP address and port (e.g.
+// "127.0.0.1:8080") requested to listen on.
+func (c *WasiConfig) PreopenTCPSocket(innerFD uint32, hostPort string) error {
+
+	c_hostPort := C.CString(hostPort)
+
+	ok := C.wasi_config_preopen_socket(c.ptr(), C.uint32_t(innerFD), c_hostPort)
+	runtime.KeepAlive(c)
+	C.free(unsafe.Pointer(&hostPort))
+	if ok {
+		return nil
+	}
+	return errors.New("failed to conifgure preopen tcp socket")
+}
+
+// InsertFile configures a file-like object to be available within the WASI
+// instance at a file descriptor specified by the caller.
+//
+// The innerFD argument is file descriptor value by which the File will be known
+// in WASM. The os.File can be any type that wraps an os.File, e.g. a net.Conn
+// deep down is an os.File.
+func (c *WasiConfig) InsertFile(innerFD uint32, file os.File, accessMode FileAccessMode) error {
+	ok := C.wasi_config_insert_file(
+		c.ptr(),
+		C.uint32_t(innerFD),
+		C.uint32_t(file.Fd()),
+		C.uint32_t(accessMode))
+
+	runtime.KeepAlive(c)
+	runtime.KeepAlive(file)
+
+	if !ok {
+		return errors.New("failed to insert file")
+	}
+
+	return nil
+}
+
+// PushFile attempts to select a valid (not already taken) file descrptor to
+// which it can map the provided file-like object in the WASI configuration on
+// build. If no valid file descriptor is available, an error is returned,
+// otherwise the sellected inner file descriptor is returned.
+func (c *WasiConfig) PushFile(file os.File, accessMode FileAccessMode) (uint32, error) {
+	c_retValue := C.CString("")
+
+	c_innerFD := uint32(C.wasi_config_push_file(
+		c.ptr(),
+		C.uint32_t(file.Fd()),
+		C.uint32_t(accessMode),
+		&c_retValue))
+
+	runtime.KeepAlive(c)
+	runtime.KeepAlive(file)
+
+	out := C.GoString(c_retValue)
+	if out != "" {
+		return 0, errors.New(out)
+	}
+	return c_innerFD, nil
+
+}
+
+// FileAccessMode Indicates whether the file-like object being inserted into the
+// WASI configuration (by PushFile and InsertFile) can be used to read, write,
+// or both using bitflags. This seems to be a wasmtime specific mapping as it
+// does not match syscall.O_RDONLY, O_WRONLY, etc.
+type FileAccessMode uint32
+
+const (
+	READ FileAccessMode = 1 << iota
+	WRITE
+)
